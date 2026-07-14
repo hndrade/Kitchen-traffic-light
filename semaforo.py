@@ -9,34 +9,45 @@ Uma janela pequena, sempre no topo, mostrando um semáforo realista:
   - VERMELHO: cozinha fechada (limpeza em andamento)
 
 Os horários de fechamento e os dias da semana são configuráveis pelo
-ícone de engrenagem (⚙) e persistidos em settings.json ao lado do script.
+ícone de engrenagem (⚙) e persistidos em settings.json ao lado do script
+(ou do .exe, quando compilado).
 
-Somente biblioteca padrão (Tkinter). Execute com:  pythonw semaforo.py
+Nos dias sem agendamento o widget inicia minimizado na bandeja do sistema
+(ao lado do relógio); clique no ícone da bandeja para mostrar/ocultar.
+Clique com o botão direito no semáforo para o menu (minimizar/config/sair).
+
+Somente biblioteca padrão (Tkinter + ctypes/winreg). Execute com:
+    pythonw semaforo.py
 """
 
 import json
 import os
 import sys
 import tkinter as tk
-from tkinter import ttk
 from datetime import datetime
+
+IS_WINDOWS = sys.platform == "win32"
 
 # ---------------------------------------------------------------------------
 # Configuração / persistência
 # ---------------------------------------------------------------------------
 
-SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
+if getattr(sys, "frozen", False):          # rodando como .exe (PyInstaller)
+    BASE_DIR = os.path.dirname(os.path.abspath(sys.executable))
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SETTINGS_FILE = os.path.join(BASE_DIR, "settings.json")
 
 # Semana em ordem brasileira: Seg Ter Qua Qui Sex Sáb Dom
 DAY_LETTERS = ["S", "T", "Q", "Q", "S", "S", "D"]   # índice 0 = segunda ... 6 = domingo
 DAY_NAMES = ["Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo"]
 
 DEFAULT_SETTINGS = {
-    "days": ["S", "T", "Q", "Q", "S"],              # letras posicionais (compatibilidade)
-    "day_indices": [0, 1, 2, 3, 4],                  # forma não ambígua: 0=Seg ... 6=Dom
+    "days": ["S", "T"],                              # letras posicionais (compatibilidade)
+    "day_indices": [0, 1],                           # forma não ambígua: 0=Seg ... 6=Dom
     "schedules": [
         {"start": "09:30", "end": "10:30"},
-        {"start": "14:00", "end": "15:30"},
+        {"start": "14:00", "end": "15:00"},
     ],
 }
 
@@ -70,12 +81,11 @@ def load_settings():
         schedules = []
         for item in data["schedules"]:
             try:
-                start = parse_hhmm(item["start"])
-                end = parse_hhmm(item["end"])
+                parse_hhmm(item["start"])
+                parse_hhmm(item["end"])
             except (KeyError, TypeError, ValueError):
                 continue
-            if start is not None and end is not None:
-                schedules.append({"start": item["start"], "end": item["end"]})
+            schedules.append({"start": item["start"], "end": item["end"]})
         settings["schedules"] = schedules
     if isinstance(data.get("day_indices"), list):
         settings["day_indices"] = sorted({i for i in data["day_indices"] if isinstance(i, int) and 0 <= i <= 6})
@@ -109,6 +119,12 @@ def parse_hhmm(text):
 
 GREEN, YELLOW, RED = "green", "yellow", "red"
 
+STATE_LABELS = {
+    GREEN: "Verde — cozinha aberta",
+    YELLOW: "Amarelo — fecha em instantes",
+    RED: "Vermelho — cozinha fechada",
+}
+
 
 def compute_state(now, settings):
     """Retorna GREEN, YELLOW ou RED para o instante `now`."""
@@ -133,11 +149,62 @@ def compute_state(now, settings):
     return GREEN
 
 
+def is_scheduled_day(now, settings):
+    """True se hoje é um dia com períodos de fechamento configurados."""
+    return bool(settings["schedules"]) and now.weekday() in settings["day_indices"]
+
+
 # ---------------------------------------------------------------------------
-# Janela principal — o semáforo
+# Inicialização automática com o Windows (chave Run do registro)
 # ---------------------------------------------------------------------------
 
-TRANSPARENT_KEY = "#ff00fe"  # cor-chave para transparência no Windows
+AUTOSTART_APP_NAME = "SemaforoCozinha"
+AUTOSTART_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+
+if IS_WINDOWS:
+    import winreg
+
+    def autostart_command():
+        if getattr(sys, "frozen", False):
+            return '"%s"' % sys.executable
+        pythonw = os.path.join(sys.exec_prefix, "pythonw.exe")
+        interpreter = pythonw if os.path.exists(pythonw) else sys.executable
+        return '"%s" "%s"' % (interpreter, os.path.abspath(__file__))
+
+    def get_autostart():
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_RUN_KEY) as key:
+                winreg.QueryValueEx(key, AUTOSTART_APP_NAME)
+            return True
+        except OSError:
+            return False
+
+    def set_autostart(enabled):
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_RUN_KEY, 0,
+                            winreg.KEY_SET_VALUE) as key:
+            if enabled:
+                winreg.SetValueEx(key, AUTOSTART_APP_NAME, 0, winreg.REG_SZ,
+                                  autostart_command())
+            else:
+                try:
+                    winreg.DeleteValue(key, AUTOSTART_APP_NAME)
+                except FileNotFoundError:
+                    pass
+else:
+    def get_autostart():
+        return False
+
+    def set_autostart(enabled):
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Ícone na bandeja do sistema (Shell_NotifyIcon via ctypes — só Windows)
+# ---------------------------------------------------------------------------
+
+def hex_to_rgb(color):
+    return int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)
+
 
 # (cor apagada, cor acesa, cor do centro aceso, cor do halo)
 BULB_COLORS = {
@@ -145,6 +212,200 @@ BULB_COLORS = {
     YELLOW: ("#3d330c", "#f2b60d", "#ffe98a", "#c79a1e"),
     GREEN:  ("#0c2e14", "#17c93a", "#8affa8", "#1e9e3e"),
 }
+
+if IS_WINDOWS:
+    import ctypes
+    from ctypes import wintypes
+
+    _user32 = ctypes.windll.user32
+    _gdi32 = ctypes.windll.gdi32
+    _shell32 = ctypes.windll.shell32
+    _kernel32 = ctypes.windll.kernel32
+
+    WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, ctypes.c_void_p,
+                                 ctypes.c_uint, ctypes.c_size_t, ctypes.c_ssize_t)
+
+    _user32.DefWindowProcW.restype = ctypes.c_ssize_t
+    _user32.DefWindowProcW.argtypes = [ctypes.c_void_p, ctypes.c_uint,
+                                       ctypes.c_size_t, ctypes.c_ssize_t]
+    _user32.CreateWindowExW.restype = ctypes.c_void_p
+    _user32.CreateWindowExW.argtypes = [wintypes.DWORD, ctypes.c_wchar_p,
+                                        ctypes.c_wchar_p, wintypes.DWORD,
+                                        ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                        ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p,
+                                        ctypes.c_void_p, ctypes.c_void_p]
+    _user32.CreateIconIndirect.restype = ctypes.c_void_p
+    _user32.DestroyIcon.argtypes = [ctypes.c_void_p]
+    _user32.DestroyWindow.argtypes = [ctypes.c_void_p]
+    _kernel32.GetModuleHandleW.restype = ctypes.c_void_p
+    _gdi32.CreateBitmap.restype = ctypes.c_void_p
+    _gdi32.CreateBitmap.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint,
+                                    ctypes.c_uint, ctypes.c_char_p]
+    _gdi32.DeleteObject.argtypes = [ctypes.c_void_p]
+
+    class WNDCLASSW(ctypes.Structure):
+        _fields_ = [
+            ("style", ctypes.c_uint),
+            ("lpfnWndProc", WNDPROC),
+            ("cbClsExtra", ctypes.c_int),
+            ("cbWndExtra", ctypes.c_int),
+            ("hInstance", ctypes.c_void_p),
+            ("hIcon", ctypes.c_void_p),
+            ("hCursor", ctypes.c_void_p),
+            ("hbrBackground", ctypes.c_void_p),
+            ("lpszMenuName", ctypes.c_wchar_p),
+            ("lpszClassName", ctypes.c_wchar_p),
+        ]
+
+    class ICONINFO(ctypes.Structure):
+        _fields_ = [
+            ("fIcon", wintypes.BOOL),
+            ("xHotspot", wintypes.DWORD),
+            ("yHotspot", wintypes.DWORD),
+            ("hbmMask", ctypes.c_void_p),
+            ("hbmColor", ctypes.c_void_p),
+        ]
+
+    class NOTIFYICONDATA(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", wintypes.DWORD),
+            ("hWnd", ctypes.c_void_p),
+            ("uID", ctypes.c_uint),
+            ("uFlags", ctypes.c_uint),
+            ("uCallbackMessage", ctypes.c_uint),
+            ("hIcon", ctypes.c_void_p),
+            ("szTip", ctypes.c_wchar * 128),
+            ("dwState", wintypes.DWORD),
+            ("dwStateMask", wintypes.DWORD),
+            ("szInfo", ctypes.c_wchar * 256),
+            ("uVersion", ctypes.c_uint),
+            ("szInfoTitle", ctypes.c_wchar * 64),
+            ("dwInfoFlags", wintypes.DWORD),
+        ]
+
+    NIF_MESSAGE, NIF_ICON, NIF_TIP = 0x1, 0x2, 0x4
+    NIM_ADD, NIM_MODIFY, NIM_DELETE = 0x0, 0x1, 0x2
+    WM_LBUTTONUP, WM_LBUTTONDBLCLK = 0x0202, 0x0203
+    HWND_MESSAGE = ctypes.c_void_p(-3 & (2 ** (8 * ctypes.sizeof(ctypes.c_void_p)) - 1))
+
+    class WinTray:
+        """Ícone na área de notificação (perto do relógio) desenhado como um
+        mini-semáforo com a luz do estado atual acesa."""
+
+        WM_TRAY = 0x8000 + 20  # WM_APP + 20
+        ICON_SIZE = 32
+
+        def __init__(self, on_click):
+            self.on_click = on_click
+            self.hicon = None
+            self._added = False
+            self._tip = "Semáforo da Cozinha"
+
+            hinstance = _kernel32.GetModuleHandleW(None)
+            self._wndproc = WNDPROC(self._wnd_proc)  # manter referência viva
+            wc = WNDCLASSW()
+            wc.lpfnWndProc = self._wndproc
+            wc.hInstance = hinstance
+            wc.lpszClassName = "SemaforoCozinhaTray"
+            if not _user32.RegisterClassW(ctypes.byref(wc)):
+                raise ctypes.WinError()
+            self.hwnd = _user32.CreateWindowExW(
+                0, wc.lpszClassName, None, 0, 0, 0, 0, 0,
+                HWND_MESSAGE, None, hinstance, None)
+            if not self.hwnd:
+                raise ctypes.WinError()
+            # se o Explorer reiniciar, a bandeja é recriada — readicionar o ícone
+            self._taskbar_created = _user32.RegisterWindowMessageW("TaskbarCreated")
+
+        def _wnd_proc(self, hwnd, msg, wparam, lparam):
+            if msg == self.WM_TRAY:
+                if lparam in (WM_LBUTTONUP, WM_LBUTTONDBLCLK):
+                    try:
+                        self.on_click()
+                    except Exception:
+                        pass
+                return 0
+            if msg == self._taskbar_created and self.hicon:
+                self._added = False
+                self._notify(NIM_ADD)
+                return 0
+            return _user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+        def _icon_pixels(self, state):
+            """Bitmap BGRA 32x32 de um mini-semáforo com `state` aceso."""
+            size = self.ICON_SIZE
+            buf = bytearray(size * size * 4)
+
+            def put(x, y, rgb, alpha=255):
+                if 0 <= x < size and 0 <= y < size:
+                    i = (y * size + x) * 4
+                    buf[i], buf[i + 1], buf[i + 2], buf[i + 3] = rgb[2], rgb[1], rgb[0], alpha
+
+            body, rim = (24, 26, 28), (70, 74, 78)
+            for y in range(0, size):
+                for x in range(10, 22):
+                    edge = y in (0, size - 1) or x in (10, 21)
+                    put(x, y, rim if edge else body)
+            centers = ((RED, 6), (YELLOW, 16), (GREEN, 26))
+            for name, cy in centers:
+                off_hex, lit_hex = BULB_COLORS[name][0], BULB_COLORS[name][1]
+                rgb = hex_to_rgb(lit_hex if name == state else off_hex)
+                for dy in range(-4, 5):
+                    for dx in range(-4, 5):
+                        if dx * dx + dy * dy <= 18:
+                            put(16 + dx, cy + dy, rgb)
+            return bytes(buf)
+
+        def _make_hicon(self, state):
+            size = self.ICON_SIZE
+            hbm_color = _gdi32.CreateBitmap(size, size, 1, 32, self._icon_pixels(state))
+            hbm_mask = _gdi32.CreateBitmap(size, size, 1, 1, bytes(size * ((size + 15) // 16) * 2))
+            info = ICONINFO(True, 0, 0, hbm_mask, hbm_color)
+            hicon = _user32.CreateIconIndirect(ctypes.byref(info))
+            _gdi32.DeleteObject(hbm_color)
+            _gdi32.DeleteObject(hbm_mask)
+            return hicon
+
+        def _notify(self, action):
+            data = NOTIFYICONDATA()
+            data.cbSize = ctypes.sizeof(NOTIFYICONDATA)
+            data.hWnd = self.hwnd
+            data.uID = 1
+            data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP
+            data.uCallbackMessage = self.WM_TRAY
+            data.hIcon = self.hicon
+            data.szTip = self._tip[:127]
+            if _shell32.Shell_NotifyIconW(action, ctypes.byref(data)):
+                if action == NIM_ADD:
+                    self._added = True
+
+        def set_state(self, state):
+            old = self.hicon
+            self.hicon = self._make_hicon(state)
+            self._tip = "Semáforo da Cozinha\n%s" % STATE_LABELS[state]
+            self._notify(NIM_MODIFY if self._added else NIM_ADD)
+            if old:
+                _user32.DestroyIcon(old)
+
+        def destroy(self):
+            if self._added:
+                data = NOTIFYICONDATA()
+                data.cbSize = ctypes.sizeof(NOTIFYICONDATA)
+                data.hWnd = self.hwnd
+                data.uID = 1
+                _shell32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(data))
+                self._added = False
+            if self.hicon:
+                _user32.DestroyIcon(self.hicon)
+                self.hicon = None
+            _user32.DestroyWindow(self.hwnd)
+
+
+# ---------------------------------------------------------------------------
+# Janela principal — o semáforo
+# ---------------------------------------------------------------------------
+
+TRANSPARENT_KEY = "#ff00fe"  # cor-chave para transparência no Windows
 
 
 class TrafficLightWidget:
@@ -176,8 +437,36 @@ class TrafficLightWidget:
 
         self.canvas.bind("<ButtonPress-1>", self._on_press)
         self.canvas.bind("<B1-Motion>", self._on_drag)
+        self.canvas.bind("<ButtonPress-3>", self._show_menu)
 
         self._draw_static()
+
+        # --- bandeja do sistema + visibilidade inicial ---
+        self.tray = None
+        if IS_WINDOWS:
+            try:
+                self.tray = WinTray(self._on_tray_click)
+            except Exception:
+                self.tray = None
+
+        now = datetime.now()
+        self._user_override = None          # True/False = escolha manual do dia
+        self._override_date = now.date()
+        self._visible = True
+        if self.tray and not is_scheduled_day(now, self.settings):
+            self._visible = False
+            root.withdraw()                 # dia sem agendamento: só a bandeja
+
+        # --- menu de contexto (botão direito) ---
+        self.menu = tk.Menu(root, tearoff=0)
+        if self.tray:
+            self.menu.add_command(label="Minimizar para a bandeja",
+                                  command=self._minimize_to_tray)
+        self.menu.add_command(label="Configurações…", command=self._open_settings)
+        self.menu.add_separator()
+        self.menu.add_command(label="Sair", command=self.quit)
+
+        root.protocol("WM_DELETE_WINDOW", self.quit)
         self._tick()
 
     # -- desenho ------------------------------------------------------------
@@ -284,11 +573,55 @@ class TrafficLightWidget:
     # -- comportamento -------------------------------------------------------
 
     def _tick(self):
-        state = compute_state(datetime.now(), self.settings)
+        now = datetime.now()
+        if now.date() != self._override_date:   # novo dia: volta à regra automática
+            self._override_date = now.date()
+            self._user_override = None
+
+        state = compute_state(now, self.settings)
         if state != self.state:
             self.state = state
             self._apply_state(state)
+            if self.tray:
+                try:
+                    self.tray.set_state(state)
+                except Exception:
+                    pass
+
+        if self.tray:
+            if self._user_override is not None:
+                desired = self._user_override
+            else:
+                desired = is_scheduled_day(now, self.settings)
+            self._set_visible(desired)
+
         self.root.after(1000, self._tick)
+
+    def _set_visible(self, visible):
+        if visible == self._visible:
+            return
+        self._visible = visible
+        if visible:
+            self.root.deiconify()
+            self.root.overrideredirect(True)
+            self.root.attributes("-topmost", True)
+            self.root.lift()
+        else:
+            self.root.withdraw()
+
+    def _on_tray_click(self):
+        self._user_override = not self._visible
+        self._set_visible(self._user_override)
+
+    def _minimize_to_tray(self):
+        self._user_override = False
+        self._set_visible(False)
+
+    def _show_menu(self, event):
+        try:
+            self.menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.menu.grab_release()
 
     def _on_press(self, event):
         if "gear" in self.canvas.gettags("current"):
@@ -312,6 +645,14 @@ class TrafficLightWidget:
     def reload_settings(self, settings):
         self.settings = settings
         self.state = None  # força reavaliação/redesenho no próximo tick
+
+    def quit(self):
+        if self.tray:
+            try:
+                self.tray.destroy()
+            except Exception:
+                pass
+        self.root.destroy()
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +709,15 @@ class SettingsWindow:
                             activeforeground=FG, relief="flat", width=3,
                             font=("Segoe UI", 11, "bold"), cursor="hand2")
         add_btn.pack(anchor="w", pady=(2, 10))
+
+        # --- iniciar com o Windows ---
+        self.autostart_var = tk.BooleanVar(value=get_autostart())
+        if IS_WINDOWS:
+            tk.Checkbutton(
+                self.win, text="Iniciar com o Windows", variable=self.autostart_var,
+                bg=BG, fg=FG, selectcolor=BTN_BG, activebackground=BG,
+                activeforeground=FG, font=("Segoe UI", 9),
+            ).pack(anchor="w", pady=(0, 6))
 
         self.error_label = tk.Label(self.win, text="", bg=BG, fg="#e05050",
                                     font=("Segoe UI", 9))
@@ -485,6 +835,11 @@ class SettingsWindow:
         except OSError as exc:
             self.error_label.configure(text="Erro ao salvar: %s" % exc)
             return
+        try:
+            set_autostart(self.autostart_var.get())
+        except OSError as exc:
+            self.error_label.configure(text="Erro no registro: %s" % exc)
+            return
         self.app.reload_settings(load_settings())
         self._close()
 
@@ -504,8 +859,15 @@ class SettingsWindow:
 
 def main():
     root = tk.Tk()
-    TrafficLightWidget(root)
-    root.mainloop()
+    widget = TrafficLightWidget(root)
+    try:
+        root.mainloop()
+    finally:
+        if widget.tray:
+            try:
+                widget.tray.destroy()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

@@ -1,8 +1,8 @@
 {
-  "days": ["S", "T", "Q", "Q", "S"],
-  "day_indices": [0, 1, 2, 3, 4],
+  "days": ["S", "T"],
+  "day_indices": [0, 1],
   "schedules": [
     {"start": "09:30", "end": "10:30"},
-    {"start": "14:00", "end": "15:30"}
+    {"start": "14:00", "end": "15:00"}
   ]
 }
