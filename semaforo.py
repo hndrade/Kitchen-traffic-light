@@ -49,9 +49,19 @@ DEFAULT_SETTINGS = {
         {"start": "09:30", "end": "10:30"},
         {"start": "14:00", "end": "15:00"},
     ],
+    "scale": 1.0,                                    # tamanho do widget (0.6 a 2.0)
 }
 
 YELLOW_WARNING_MINUTES = 5
+MIN_SCALE, MAX_SCALE = 0.6, 2.0
+
+
+def clamp_scale(value):
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return 1.0
+    return max(MIN_SCALE, min(MAX_SCALE, value))
 
 
 def letters_to_indices(letters):
@@ -92,6 +102,7 @@ def load_settings():
     elif isinstance(data.get("days"), list):
         settings["day_indices"] = letters_to_indices(data["days"])
     settings["days"] = [DAY_LETTERS[i] for i in settings["day_indices"]]
+    settings["scale"] = clamp_scale(data.get("scale", DEFAULT_SETTINGS["scale"]))
     return settings
 
 
@@ -409,7 +420,7 @@ TRANSPARENT_KEY = "#ff00fe"  # cor-chave para transparência no Windows
 
 
 class TrafficLightWidget:
-    WIDTH, HEIGHT = 150, 330
+    BASE_WIDTH, BASE_HEIGHT = 150, 330
 
     def __init__(self, root):
         self.root = root
@@ -417,6 +428,10 @@ class TrafficLightWidget:
         self.state = None
         self.settings_window = None
         self._drag_offset = None
+
+        self.scale = clamp_scale(self.settings.get("scale", 1.0))
+        self.WIDTH = round(self.BASE_WIDTH * self.scale)
+        self.HEIGHT = round(self.BASE_HEIGHT * self.scale)
 
         root.title("Semáforo da Cozinha")
         root.overrideredirect(True)
@@ -482,13 +497,14 @@ class TrafficLightWidget:
 
     def _draw_static(self):
         c = self.canvas
-        cx = self.WIDTH // 2
+        W, H = self.BASE_WIDTH, self.BASE_HEIGHT
+        cx = W // 2
 
         # --- poste (estilo de rua) ---
         pole_w = 18
-        c.create_rectangle(cx - pole_w // 2, 270, cx + pole_w // 2, self.HEIGHT,
+        c.create_rectangle(cx - pole_w // 2, 270, cx + pole_w // 2, H,
                            fill="#3c3f42", outline="#26282a")
-        c.create_rectangle(cx - pole_w // 2 + 3, 270, cx - pole_w // 2 + 6, self.HEIGHT,
+        c.create_rectangle(cx - pole_w // 2 + 3, 270, cx - pole_w // 2 + 6, H,
                            fill="#55595d", outline="")  # brilho lateral do poste
         # braçadeiras do poste
         for y in (280, 305):
@@ -496,7 +512,7 @@ class TrafficLightWidget:
                                fill="#2a2c2e", outline="#1a1b1c")
 
         # --- corpo do semáforo ---
-        bx1, by1, bx2, by2 = 30, 8, self.WIDTH - 30, 276
+        bx1, by1, bx2, by2 = 30, 8, W - 30, 276
         self._rounded_rect(bx1 - 3, by1 - 3, bx2 + 3, by2 + 3, 22,
                            fill="#0c0c0d", outline="")            # sombra/borda externa
         self._rounded_rect(bx1, by1, bx2, by2, 20,
@@ -554,6 +570,12 @@ class TrafficLightWidget:
         c.tag_bind("gear", "<Leave>",
                    lambda e: (c.itemconfigure(self.gear, fill="#5a5e62"),
                               c.configure(cursor="")))
+
+        # aplica o tamanho escolhido: escala todas as coordenadas de uma vez
+        if abs(self.scale - 1.0) > 1e-6:
+            c.scale("all", 0, 0, self.scale, self.scale)
+            c.itemconfigure(self.gear,
+                            font=("Segoe UI Symbol", max(7, round(11 * self.scale))))
 
     def _apply_state(self, state):
         c = self.canvas
@@ -643,8 +665,26 @@ class TrafficLightWidget:
         self.settings_window = SettingsWindow(self)
 
     def reload_settings(self, settings):
+        new_scale = clamp_scale(settings.get("scale", self.scale))
         self.settings = settings
-        self.state = None  # força reavaliação/redesenho no próximo tick
+        if abs(new_scale - self.scale) > 1e-6:
+            self.rebuild(new_scale)
+        else:
+            self.state = None  # força reavaliação/redesenho no próximo tick
+
+    def rebuild(self, new_scale):
+        """Redimensiona a janela/canvas e redesenha o semáforo na nova escala."""
+        self.scale = clamp_scale(new_scale)
+        self.WIDTH = round(self.BASE_WIDTH * self.scale)
+        self.HEIGHT = round(self.BASE_HEIGHT * self.scale)
+        x, y = self.root.winfo_x(), self.root.winfo_y()
+        self.canvas.config(width=self.WIDTH, height=self.HEIGHT)
+        self.root.geometry("%dx%d+%d+%d" % (self.WIDTH, self.HEIGHT, x, y))
+        self.canvas.delete("all")
+        self._draw_static()
+        state = compute_state(datetime.now(), self.settings)
+        self.state = state
+        self._apply_state(state)
 
     def quit(self):
         if self.tray:
@@ -667,6 +707,8 @@ class SettingsWindow:
     def __init__(self, app):
         self.app = app
         self.schedules = [dict(s) for s in app.settings["schedules"]]
+        self._orig_scale = app.scale       # para restaurar se fechar sem salvar
+        self._saved = False
 
         self.win = tk.Toplevel(app.root)
         self.win.title("Configurações — Semáforo da Cozinha")
@@ -709,6 +751,23 @@ class SettingsWindow:
                             activeforeground=FG, relief="flat", width=3,
                             font=("Segoe UI", 11, "bold"), cursor="hand2")
         add_btn.pack(anchor="w", pady=(2, 10))
+
+        # --- tamanho do widget ---
+        size_head = tk.Frame(self.win, bg=BG)
+        size_head.pack(anchor="w", fill="x", pady=(4, 0))
+        tk.Label(size_head, text="Tamanho do widget", bg=BG, fg=FG,
+                 font=("Segoe UI", 10, "bold")).pack(side="left")
+        self.size_label = tk.Label(size_head, text="%d%%" % round(app.scale * 100),
+                                   bg=BG, fg=ACCENT, font=("Segoe UI", 10, "bold"))
+        self.size_label.pack(side="right")
+        self.scale_var = tk.IntVar(value=round(app.scale * 100))
+        tk.Scale(
+            self.win, from_=int(MIN_SCALE * 100), to=int(MAX_SCALE * 100),
+            orient="horizontal", variable=self.scale_var, showvalue=False,
+            command=self._on_size, bg=BG, fg=FG, troughcolor=BTN_BG,
+            activebackground=ACCENT, highlightthickness=0, bd=0, sliderrelief="flat",
+            length=210,
+        ).pack(anchor="w", pady=(0, 8))
 
         # --- iniciar com o Windows ---
         self.autostart_var = tk.BooleanVar(value=get_autostart())
@@ -825,10 +884,16 @@ class SettingsWindow:
         del self.schedules[index]
         self._rebuild_list()
 
+    def _on_size(self, value):
+        pct = int(float(value))
+        self.size_label.configure(text="%d%%" % pct)
+        self.app.rebuild(pct / 100.0)   # preview ao vivo
+
     def _save(self):
         settings = {
             "day_indices": [i for i, var in enumerate(self.day_vars) if var.get()],
             "schedules": self.schedules,
+            "scale": clamp_scale(self.scale_var.get() / 100.0),
         }
         try:
             save_settings(settings)
@@ -840,10 +905,14 @@ class SettingsWindow:
         except OSError as exc:
             self.error_label.configure(text="Erro no registro: %s" % exc)
             return
+        self._saved = True
         self.app.reload_settings(load_settings())
         self._close()
 
     def _close(self):
+        # se fechou sem salvar, desfaz o preview de tamanho
+        if not self._saved and abs(self.app.scale - self._orig_scale) > 1e-6:
+            self.app.rebuild(self._orig_scale)
         self.win.destroy()
         self.app.settings_window = None
 

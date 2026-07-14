@@ -45,6 +45,9 @@ Na janela de configurações:
 - **Períodos de fechamento** — lista de faixas como `09:30 às 10:30`,
   com `x` para excluir cada uma.
 - **+** — adiciona uma nova faixa (seletores de hora/minuto para início e fim).
+- **Tamanho do widget** — controle deslizante de 60% a 200% com pré-visualização
+  ao vivo (o semáforo redimensiona enquanto você arrasta). Se fechar sem salvar,
+  o tamanho volta ao anterior.
 - **Iniciar com o Windows** — marca/desmarca a inicialização automática ao
   ligar o PC (grava na chave `Run` do registro do usuário; vale tanto para o
   script quanto para o .exe compilado).
@@ -81,9 +84,13 @@ criar um atalho do .exe na pasta `shell:startup`.)
   "schedules": [
     {"start": "09:30", "end": "10:30"},
     {"start": "14:00", "end": "15:00"}
-  ]
+  ],
+  "scale": 1.0
 }
 ```
+
+`scale` é o multiplicador de tamanho do widget (1.0 = 150×330 px), entre
+0.6 e 2.0; valores fora da faixa são ajustados ao abrir.
 
 `days` guarda as letras posicionais da semana (formato legível); como as
 letras `S` e `Q` se repetem, o campo `day_indices` (0 = segunda … 6 = domingo)
