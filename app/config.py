@@ -7,9 +7,17 @@ DAYS = ["Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo"]
 CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".kitchen_traffic_light")
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 
+DEFAULT_BLOCKS = [
+    {"start": "09:30", "end": "10:30"},
+    {"start": "14:00", "end": "15:00"},
+]
+
 DEFAULT_CONFIG = {
     "schedule": {
-        day: {"enabled": day not in ("Sábado", "Domingo"), "open": "11:30", "close": "14:00"}
+        day: {
+            "enabled": day not in ("Sábado", "Domingo"),
+            "blocks": [dict(b) for b in DEFAULT_BLOCKS],
+        }
         for day in DAYS
     },
     "start_with_windows": False,

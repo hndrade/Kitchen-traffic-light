@@ -49,16 +49,17 @@ class Scheduler:
         if not entry or not entry.get("enabled"):
             return
 
-        open_h, open_m = _parse_time(entry["open"])
-        close_h, close_m = _parse_time(entry["close"])
-        open_dt = now.replace(hour=open_h, minute=open_m, second=0, microsecond=0)
-        close_dt = now.replace(hour=close_h, minute=close_m, second=0, microsecond=0)
-        open_soon_dt = open_dt - timedelta(minutes=5)
-        close_soon_dt = close_dt - timedelta(minutes=5)
+        for i, block in enumerate(entry.get("blocks", [])):
+            start_h, start_m = _parse_time(block["start"])
+            end_h, end_m = _parse_time(block["end"])
+            start_dt = now.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
+            end_dt = now.replace(hour=end_h, minute=end_m, second=0, microsecond=0)
+            close_soon_dt = start_dt - timedelta(minutes=5)
+            open_soon_dt = end_dt - timedelta(minutes=5)
 
-        self._maybe_fire("open_soon", now, open_soon_dt, notify_opens_soon)
-        self._maybe_fire("open", now, open_dt, notify_kitchen_open)
-        self._maybe_fire("close_soon", now, close_soon_dt, notify_closes_soon)
+            self._maybe_fire(f"close_soon_{i}", now, close_soon_dt, notify_closes_soon)
+            self._maybe_fire(f"open_soon_{i}", now, open_soon_dt, notify_opens_soon)
+            self._maybe_fire(f"open_{i}", now, end_dt, notify_kitchen_open)
 
     def _maybe_fire(self, key, now, target_dt, action):
         if key in self._fired_today:
